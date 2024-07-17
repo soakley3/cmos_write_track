@@ -1,0 +1,97 @@
+#
+#
+# To run this:
+#   Will start and occupy a session:
+#     # stap -g cmos_write_Track.stp -v
+# 
+#   Or start in the background writing to a file in /tmp/
+#     # stap -g cmos_write_Track.stp -v 2>&1 > /tmp/stap-$(hostname)-$(date | sed -e 's/ /-/g').txt &
+#
+#   If started in the background, kill with the following:
+#     # pkill -INT stap
+#
+# Example output:
+#
+# $ cat /tmp/stap-hostname-com-Tue-Jul-16-04\:42\:02-PM-EDT-2024.txt 
+#
+# VL Tue Jul 16 20:42:05 2024: Starting rtc_cmos_write monitoring 
+#
+# VL ---> Tue Jul 16 20:50:57 2024: kworker/28:2 (1168) called rtc_cmos_write 
+# VL --->     val     = 0x76
+# VL --->     addr    = 0xa
+# 
+# PID parental hierarchy:
+#        UID         PID  Command
+#          0        1168  kworker/28:2
+#          0           2  kthreadd
+# 
+#  0xffffffffb4830d50 : rtc_cmos_write+0x0/0x20 [kernel]
+#  0xffffffffb501ef63 : mc146818_set_time+0x123/0x250 [kernel]
+#  0xffffffffb4830db7 : mach_set_rtc_mmss+0x47/0x80 [kernel]
+#  0xffffffffb4830f92 : update_persistent_clock64+0x22/0x30 [kernel]
+#  0xffffffffb49a3a19 : sync_hw_clock+0xf9/0x1f0 [kernel]
+#  0xffffffffb4918262 : process_one_work+0x1e2/0x3b0 [kernel]
+#  0xffffffffb4918810 : worker_thread+0x50/0x3a0 [kernel]
+#  0xffffffffb491fb86 : kthread+0xd6/0x100 [kernel]
+#  0xffffffffb4802d9f : ret_from_fork+0x1f/0x30 [kernel]
+
+#
+
+%{
+#include <linux/sched.h>
+#include <linux/cred.h>
+%}
+
+function print_process_call_trace (pid:long)
+%{      
+
+        pid_t cur_pid, cur_ppid = (pid_t)STAP_ARG_pid;
+        kuid_t cur_uid;
+        char cur_cmd[TASK_COMM_LEN];
+        struct task_struct *cur = current;
+        const struct cred *cur_cred;
+        STAP_PRINTF("PID parental hierarchy:\n");
+        STAP_PRINTF("%10s  %10s  %.*s\n", "UID", "PID", TASK_COMM_LEN, "Command");
+        rcu_read_lock();
+        do {    
+                cur_pid = cur_ppid;
+                get_task_comm(cur_cmd, cur);
+                cur_cred = rcu_dereference(cur->real_cred);
+
+                STAP_PRINTF("%10u  %10u  %.*s\n", cur_cred->uid.val, cur_pid, TASK_COMM_LEN, cur_cmd);
+                if(!pid_alive(cur))
+                        break;
+                
+                cur = rcu_dereference(cur->real_parent);
+                cur_ppid = task_pid_nr_ns(cur, &init_pid_ns);
+        } while(cur_ppid != 0);
+        
+	//dump_stack();  // not needed for this exercise and may cause excessive cycle time in stap.
+        rcu_read_unlock();
+%}
+
+probe begin {
+        printf("\nVL %s: Starting rtc_cmos_write monitoring \n\n", ctime(gettimeofday_s()));
+}
+
+probe end {
+        printf("\nVL %s: Ending rtc_cmos_write monitoring \n\n", ctime(gettimeofday_s()));
+}
+
+
+
+probe   kernel.function("rtc_cmos_write") {
+	if ($addr==10) {
+	        printf("VL ---> %s: %s (%i) called %s \n", ctime(gettimeofday_s()), execname(), pid(), ppfunc());
+		printf("VL --->     val     = %#lx\n", $val);    // what is being written
+	        printf("VL --->     addr    = %#lx\n\n", $addr); // register 0xa 
+
+		print_process_call_trace(pid()); // print task hierarchy
+			
+		printf("\n");
+
+		print_backtrace(); // print call stack
+
+		printf("\n");
+	}
+}
